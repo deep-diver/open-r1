@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer, Gemma3ForCausalLM
 
 from trl import ModelConfig, get_kbit_device_map, get_quantization_config
 
@@ -35,8 +35,14 @@ def get_model(model_args: ModelConfig, training_args: SFTConfig | GRPOConfig) ->
         device_map=get_kbit_device_map() if quantization_config is not None else None,
         quantization_config=quantization_config,
     )
-    model = AutoModelForCausalLM.from_pretrained(
-        model_args.model_name_or_path,
-        **model_kwargs,
-    )
+    if "gemma-3" in model_args.model_name_or_path:
+        model = Gemma3ForCausalLM.from_pretrained(
+            model_args.model_name_or_path,
+            **model_kwargs,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_args.model_name_or_path,
+            **model_kwargs,
+        )
     return model
