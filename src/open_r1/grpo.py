@@ -92,13 +92,25 @@ def main(script_args, training_args, model_args):
     def make_conversation(example, prompt_column: str = script_args.dataset_prompt_column):
         prompt = []
 
-        if training_args.system_prompt is not None:
-            prompt.append({"role": "system", "content": training_args.system_prompt})
+        if "gemma-2" not in training_args.model_name_or_path:
+            if training_args.system_prompt is not None:
+                prompt.append({"role": "system", "content": training_args.system_prompt})
 
-        if prompt_column not in example:
-            raise ValueError(f"Dataset Question Field Error: {prompt_column} is not supported.")
-
-        prompt.append({"role": "user", "content": example[prompt_column]})
+            if prompt_column not in example:
+                raise ValueError(f"Dataset Question Field Error: {prompt_column} is not supported.")
+    
+            prompt.append({"role": "user", "content": example[prompt_column]})
+        else:
+            print("gemma2 route")
+            if prompt_column not in example:
+                raise ValueError(f"Dataset Question Field Error: {prompt_column} is not supported.")
+                
+            prompt.append(
+                {
+                    "role": "user", 
+                    "content": f"{training_args.system_prompt}\n\n{example[prompt_column]}"
+                }
+            )
         return {"prompt": prompt}
 
     dataset = dataset.map(make_conversation)
