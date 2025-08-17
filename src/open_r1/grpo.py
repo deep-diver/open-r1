@@ -92,7 +92,7 @@ def main(script_args, training_args, model_args):
     def make_conversation(example, prompt_column: str = script_args.dataset_prompt_column):
         prompt = []
 
-        if "gemma-2" not in training_args.model_name_or_path:
+        if "gemma-2" not in model_args.model_name_or_path:
             if training_args.system_prompt is not None:
                 prompt.append({"role": "system", "content": training_args.system_prompt})
 
