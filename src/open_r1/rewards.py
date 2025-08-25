@@ -462,6 +462,20 @@ def get_code_format_reward(language: str = "python"):
 
     return code_format_reward
 
+def get_code_format_reward2(language: str = "python"):
+    """Format reward function specifically for code responses.
+
+    Args:
+        language: Programming language supported by E2B https://e2b.dev/docs/code-interpreting/supported-languages
+    """
+    pattern = rf"^<reasoning>\n.*?\n</reasoning>\n<solution>\n.*?```{language}.*?```.*?\n</solution>$"
+
+    def code_format_reward(completions, **kwargs):
+        completion_contents = [completion[0]["content"] for completion in completions]
+        matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE) for content in completion_contents]
+        return [1.0 if match else 0.0 for match in matches]
+
+    return code_format_reward
 
 def run_async_from_sync(scripts: list[str], language: str) -> list[float]:
     """Function wrapping the `run_async` function."""
@@ -527,6 +541,7 @@ def get_reward_funcs(script_args) -> list[Callable]:
             partial(ioi_code_reward, test_batch_size=script_args.code_eval_test_batch_size), ioi_code_reward
         ),
         "code_format": get_code_format_reward(language=script_args.code_language),
+        "code_format2": get_code_format_reward2(language=script_args.code_language),
         "tag_count": tag_count_reward,
         "code_based_on_unittests": code_based_on_unittests_reward,
         "curriculum_aware_reward_fn": curriculum_aware_reward_fn,
