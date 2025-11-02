@@ -10,6 +10,101 @@ if is_e2b_available():
     load_dotenv()
 else:
     AsyncSandbox = None
+    
+if is_modal_available():
+    import modal
+    
+    my_image = modal.Image.from_registry(
+        "ghcr.io/deep-diver/multipl-e:latest",
+        add_python="3.11"
+    )
+
+    app = modal.App("rl-code-executor")
+
+    @app.function(image=my_image, timeout=30)
+    def execute_code_for_rl(payload: tuple) -> tuple:
+        """
+        payload:
+        - (language, code)                          # stdin 없음 (과거 호환)
+        - (language, code, stdin_string)            # stdin 포함
+
+        반환: (stdout, stderr, returncode)
+        """
+        import os
+        import subprocess
+
+        if not isinstance(payload, (tuple, list)) or len(payload) < 2:
+            return (None, "Invalid payload. Expected (language, code[, stdin]).", 1)
+
+        # unpack with backward compatibility
+        language = payload[0]
+        code = payload[1]
+        stdin_data = payload[2] if len(payload) >= 3 else ""
+        output_data = payload[3] if len(payload) >= 4 else ""
+
+        lang = str(language).lower().strip()
+        if lang in ("javascript", "js"):
+            lang = "javascript"
+        elif lang in ("cpp", "c++"):
+            lang = "cpp"
+
+        try:
+            if lang == "python":
+                command = ["python3", "-c", code]
+
+            elif lang == "go":
+                src = "/tmp/run.go"
+                with open(src, "w", encoding="utf-8") as f:
+                    f.write(code)
+                command = ["bash", "-lc", f"go run {src}"]
+
+            elif lang == "rust":
+                src = "/tmp/run.rs"
+                bin_path = "/tmp/run_rust"
+                with open(src, "w", encoding="utf-8") as f:
+                    f.write(code)
+                command = ["bash", "-lc", f"rustc {src} -O -o {bin_path} && {bin_path}"]
+
+            elif lang == "javascript":
+                src = "/tmp/run.js"
+                with open(src, "w", encoding="utf-8") as f:
+                    f.write(code)
+                command = ["bash", "-lc", f"node {src}"]
+
+            elif lang == "cpp":
+                src = "/tmp/run.cpp"
+                bin_path = "/tmp/run_cpp"
+                with open(src, "w", encoding="utf-8") as f:
+                    f.write(code)
+                # compile; always show compiler output on stderr if any
+                command = ["bash", "-lc", f"g++ -std=c++17 -O2 {src} -o {bin_path} 2>&1 | cat; test -x {bin_path} && {bin_path}"]
+
+            else:
+                return (None, f"Unsupported language: {language}", 1)
+
+            # IMPORTANT: don't .strip() outputs; judges may require exact whitespace
+            result = subprocess.run(
+                command,
+                input=stdin_data,       # pass stdin to the program
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={**os.environ, "TMPDIR": "/tmp"},
+            )
+
+            return (
+                command, 
+                result.stdout, 
+                result.stderr, 
+                result.returncode, 
+                result.stdout.strip() == output_data.strip()
+            )
+
+        except subprocess.TimeoutExpired:
+            return (None, "Execution timed out", -1)
+        except Exception as e:
+            return (None, str(e), 1)
+
 
 def extract_code(completion: str, language: str = "python") -> str:
     pattern = re.compile(rf"```{language}\n(.*?)```", re.DOTALL)
@@ -56,10 +151,10 @@ async def run_script(sbx: AsyncSandbox, script: str, language: str) -> float:
         return 0.0
 
 def code_based_on_unittests_reward(completions, **kwargs) -> list[float]:
-    if not is_e2b_available():
+    if not is_modal_available():
         raise ImportError(
-            "E2B is not available and required for this reward function. Please install E2B with "
-            "`pip install e2b-code-interpreter` and add an API key to a `.env` file."
+            "Modal is not available and required for this reward function. Please install Modal with "
+            "`pip install modal`."
         )
 
     # Returns a reward function that evaluates code snippets in a sandbox.
@@ -119,23 +214,37 @@ def code_based_on_unittests_reward(completions, **kwargs) -> list[float]:
     """        
 
     code_snippets = [extract_code(completion[-1]["content"]) for completion in completions]
+    
+    language_info = kwargs["language"]
     verification_info = kwargs["verification_info"]
-    scripts = [
-        evaluation_script_template.format(code=json.dumps(code), test_cases=json.dumps(json.dumps(info["test_cases"])))
-        for code, info in zip(code_snippets, verification_info)
-    ]    
-    language = verification_info[0]["language"]
+    
+    payloads = [
+        (code, info["text_cases"][0]['input'], language, info["test_cases"][0]['output'])
+        for code, info, language in zip(code_snippets, verification_info, language_info)
+    ]
+    
+    with modal.enable_output():
+        # async context for Modal app
+        async with app.run.aio():
+            # gather results as they complete
+            results = [r async for r in execute_code_for_rl.map.aio(payloads)]
+            print(results)
 
-    if not all(v["language"] == language for v in verification_info):
-        raise ValueError("All verification_info must have the same language", verification_info)
-    try:
-        rewards = run_async_from_sync(scripts, language)
+    results = [1 if result[4] else 0 for result in results]
+    return sum(results)
+    
+    # scripts = [
+    #     evaluation_script_template.format(code=json.dumps(code), test_cases=json.dumps(json.dumps(info["test_cases"])))
+    #     for code, info in zip(code_snippets, verification_info)
+    # ]    
 
-    except Exception as e:
-        print(f"Error from E2B executor: {e}")
-        rewards = [0.0] * len(completions)
+    # rewards = run_async_from_sync(scripts, language_info)
 
-    return rewards
+    # except Exception as e:
+    #     print(f"Error from Modal executor: {e}")
+    #     rewards = [0.0] * len(completions)
+
+    # return rewards
 
 # Your curriculum logic
 def label_schedule(epoch: int):
