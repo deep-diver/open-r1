@@ -10,18 +10,8 @@ from typing import Callable, Dict
 from latex2sympy2_extended import NormalizationConfig
 from math_verify import LatexExtractionConfig, parse, verify
 
-from .utils import is_e2b_available
 from .utils.ioi import SubtaskResult, add_includes, get_piston_client_from_env, score_subtask
-from .code_rewards import code_based_on_unittests_reward, curriculum_aware_reward_fn
-
-if is_e2b_available():
-    from dotenv import load_dotenv
-    from e2b_code_interpreter import AsyncSandbox
-
-    load_dotenv()
-else:
-    AsyncSandbox = None
-
+from .code_rewards import unicoder_reward_fn
 
 def accuracy_reward(completions, solution, **kwargs):
     """Reward function that checks if the completion is the same as the ground truth."""
@@ -373,80 +363,6 @@ def binary_code_reward(completions, **kwargs) -> list[float]:
     BINARY_THRESHOLD = 0.99
     return [1.0 if reward > BINARY_THRESHOLD else 0.0 for reward in rewards]
 
-
-def code_reward(completions, **kwargs) -> list[float]:
-    """Reward function that evaluates code snippets using the E2B code interpreter.
-
-    Assumes the dataset contains a `verification_info` column with test cases.
-    """
-    if not is_e2b_available():
-        raise ImportError(
-            "E2B is not available and required for this reward function. Please install E2B with "
-            "`pip install e2b-code-interpreter` and add an API key to a `.env` file."
-        )
-
-    # TODO: add support for other languages in E2B: https://e2b.dev/docs/code-interpreting/supported-languages
-    """Returns a reward function that evaluates code snippets in a sandbox."""
-    evaluation_script_template = """
-    import subprocess
-    import json
-
-    def evaluate_code(code, test_cases):
-        passed = 0
-        total = len(test_cases)
-        exec_timeout = 5
-
-        for case in test_cases:
-            process = subprocess.run(
-                ["python3", "-c", code],
-                input=case["input"],
-                text=True,
-                capture_output=True,
-                timeout=exec_timeout
-            )
-
-            if process.returncode != 0:  # Error in execution
-                continue
-
-            output = process.stdout.strip()
-
-            # TODO: implement a proper validator to compare against ground truth. For now we just check for exact string match on each line of stdout.
-            all_correct = True
-            for line1, line2 in zip(output.split('\\n'), case['output'].split('\\n')):
-                all_correct = all_correct and line1.strip() == line2.strip()
-
-            if all_correct:
-                passed += 1
-
-        success_rate = (passed / total)
-        return success_rate
-
-    code_snippet = {code}
-    test_cases = json.loads({test_cases})
-
-    evaluate_code(code_snippet, test_cases)
-    """
-    code_snippets = [extract_code(completion[-1]["content"]) for completion in completions]
-    verification_info = kwargs["verification_info"]
-    scripts = [
-        evaluation_script_template.format(code=json.dumps(code), test_cases=json.dumps(json.dumps(info["test_cases"])))
-        for code, info in zip(code_snippets, verification_info)
-    ]
-
-    language = verification_info[0]["language"]
-
-    if not all(v["language"] == language for v in verification_info):
-        raise ValueError("All verification_info must have the same language", verification_info)
-    try:
-        rewards = run_async_from_sync(scripts, language)
-
-    except Exception as e:
-        print(f"Error from E2B executor: {e}")
-        rewards = [0.0] * len(completions)  
-
-    return rewards
-
-
 def get_code_format_reward(language: str = "python"):
     """Format reward function specifically for code responses.
 
@@ -477,47 +393,6 @@ def get_code_format_reward2(language: str = "python"):
 
     return code_format_reward
 
-def run_async_from_sync(scripts: list[str], language: str) -> list[float]:
-    """Function wrapping the `run_async` function."""
-    # Create a new event loop and set it
-    try:
-        # Run the async function and get the result
-        rewards = asyncio.run(run_async(scripts, language))
-    except Exception as e:
-        print(f"Error from E2B executor async: {e}")
-        raise e
-
-    return rewards
-
-
-async def run_async(scripts: list[str], language: str) -> list[float]:
-    # Create the sandbox by hand, currently there's no context manager for this version
-    sbx = await AsyncSandbox.create(timeout=30, request_timeout=3)
-
-    # Create a list of tasks for running scripts concurrently
-    tasks = [run_script(sbx, script, language) for script in scripts]
-
-    # Wait for all tasks to complete and gather their results as they finish
-    results = await asyncio.gather(*tasks)
-    rewards = list(results)  # collect results
-
-    # Kill the sandbox after all the tasks are complete
-    await sbx.kill()
-
-    return rewards
-
-
-async def run_script(sbx: AsyncSandbox, script: str, language: str) -> float:
-    execution = await sbx.run_code(script, language=language)
-    try:
-        return float(execution.text)
-    except (TypeError, ValueError):
-        return 0.0
-    except Exception as e:
-        print(f"Error from E2B executor run_script: {e}")
-        return 0.0
-
-
 def get_reward_funcs(script_args) -> list[Callable]:
     REWARD_FUNCS_REGISTRY = {
         "accuracy": accuracy_reward,
@@ -535,7 +410,8 @@ def get_reward_funcs(script_args) -> list[Callable]:
             max_penalty=script_args.repetition_max_penalty,
         ),
         "length": len_reward,
-        "code": code_reward,
+        # "code": code_reward,
+        "unicoder": unicoder_reward_fn,
         "binary_code": binary_code_reward,
         "ioi_code": update_wrapper(
             partial(ioi_code_reward, test_batch_size=script_args.code_eval_test_batch_size), ioi_code_reward
@@ -543,8 +419,8 @@ def get_reward_funcs(script_args) -> list[Callable]:
         "code_format": get_code_format_reward(language=script_args.code_language),
         "code_format2": get_code_format_reward2(language=script_args.code_language),
         "tag_count": tag_count_reward,
-        "code_based_on_unittests": code_based_on_unittests_reward,
-        "curriculum_aware_reward_fn": curriculum_aware_reward_fn,
+        # "code_based_on_unittests": code_based_on_unittests_reward,
+        # "curriculum_aware_reward_fn": curriculum_aware_reward_fn,
     }
     reward_funcs = [REWARD_FUNCS_REGISTRY[func] for func in script_args.reward_funcs]
 
